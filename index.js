@@ -1,11 +1,23 @@
 require('dotenv').config();
 
-const { IgApiClient, IgCheckpointError } = require('instagram-private-api');
+const { IgApiClient, IgCheckpointError, IgLoginRequiredError } = require('instagram-private-api');
 const FS = require('fs');
+
+const USER_SCRAP = 'banzai_motos'; // trizzinomotors, wrmotos, banzai_motos
 
 async function autenticarUsuario(ig, login, password) {
     ig.state.generateDevice(login);
     await ig.account.login(login, password);
+    const serialized = await ig.state.serialize();
+    delete serialized.constants; // Remover constantes não necessárias
+    FS.writeFileSync('session.json', JSON.stringify(serialized));
+}
+
+async function carregarSessao(ig) {
+    if (FS.existsSync('session.json')) {
+        const session = JSON.parse(FS.readFileSync('session.json', 'utf-8'));
+        await ig.state.deserialize(session);
+    }
 }
 
 function lerEstadoCursor(caminhoArquivo) {
@@ -78,22 +90,11 @@ async function obterPostagens(ig, username, cursor, delay = 2000) {
     return { allPosts, cursor: feed.serialize() };
 }
 
-function exibirPostagens(postagens) {
-    postagens.forEach(postagem => {
-        console.log(`ID: ${postagem.id}`);
-        console.log(`Legenda: ${postagem.caption ? postagem.caption.text : 'Sem legenda'}`);
-        console.log(`Tipo de Mídia: ${postagem.media_type}`);
-        console.log(`URL da Mídia: ${postagem.image_versions2 ? postagem.image_versions2.candidates[0].url : 'N/A'}`);
-        console.log(`Data: ${new Date(postagem.taken_at * 1000).toISOString()}`);
-        console.log('----------------------------------');
-    });
-}
-
 async function listarPostagens() {
     const ig = new IgApiClient();
     const cursorFile = 'cursorState.json';
     const postagensFile = 'postagensFull.json';
-    const delay = 2000;
+    const delay = 10000;
 
     const { LOGIN, PASSWORD } = process.env;
     if (!LOGIN || !PASSWORD) {
@@ -102,10 +103,14 @@ async function listarPostagens() {
     }
 
     try {
-        await autenticarUsuario(ig, LOGIN, PASSWORD);
+        await carregarSessao(ig);
+        if (!ig.state.checkpoint) {
+            await autenticarUsuario(ig, LOGIN, PASSWORD);
+        }
+
         const cursor = lerEstadoCursor(cursorFile);
         const postagensSalvas = lerPostagensSalvas(postagensFile);
-        const { allPosts, cursor: newCursor } = await obterPostagens(ig, 'trizzinomotors', cursor, delay);
+        const { allPosts, cursor: newCursor } = await obterPostagens(ig, USER_SCRAP, cursor, delay);
 
         const todasPostagens = postagensSalvas.concat(allPosts);
 
@@ -116,9 +121,15 @@ async function listarPostagens() {
         }
 
         salvarPostagensEmArquivo(todasPostagens, postagensFile);
-        exibirPostagens(todasPostagens);
         salvarEstadoCursor(cursorFile, newCursor);
+
+        console.log('Postagens salvas com sucesso.');
     } catch (error) {
+        if (error instanceof IgLoginRequiredError) {
+            console.log('Login necessário. Refazendo login...');
+            await autenticarUsuario(ig, LOGIN, PASSWORD);
+            return listarPostagens(); // Tenta novamente após refazer o login
+        }
         console.error('Erro ao listar postagens:', error);
     }
 }
