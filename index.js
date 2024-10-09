@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { IgApiClient } = require('instagram-private-api');
+const { IgApiClient, IgCheckpointError } = require('instagram-private-api');
 const FS = require('fs');
 
 async function autenticarUsuario(ig, login, password) {
@@ -20,6 +20,18 @@ function salvarEstadoCursor(caminhoArquivo, estado) {
     FS.writeFileSync(caminhoArquivo, JSON.stringify(estado, null, 2));
 }
 
+function lerPostagensSalvas(caminhoArquivo) {
+    if (FS.existsSync(caminhoArquivo)) {
+        const data = FS.readFileSync(caminhoArquivo);
+        return JSON.parse(data);
+    }
+    return [];
+}
+
+function salvarPostagensEmArquivo(postagens, caminhoArquivo) {
+    FS.writeFileSync(caminhoArquivo, JSON.stringify(postagens, null, 2));
+}
+
 async function obterPostagens(ig, username, cursor, delay = 2000) {
     const userId = await ig.user.getIdByUsername(username);
     const feed = ig.feed.user(userId);
@@ -29,20 +41,27 @@ async function obterPostagens(ig, username, cursor, delay = 2000) {
     if (cursor) {
         feed.deserialize(cursor);
     }
-    
+
     const MAX_RETRIES = 5;
     let retries = 0;
-    
+
     do {
         try {
             const items = await feed.items();
             allPosts = allPosts.concat(items);
             totalPosts += items.length;
             console.log(`Total de postagens até agora: ${totalPosts}`);
-    
+
             if (!feed.isMoreAvailable()) break;
             await new Promise(resolve => setTimeout(resolve, delay)); // Delay entre as requisições
         } catch (error) {
+            if (error instanceof IgCheckpointError) {
+                console.log('Checkpoint necessário. Resolva o desafio no Instagram.');
+                await ig.challenge.auto(true); // Tenta resolver o desafio automaticamente
+                console.log('Desafio resolvido. Tente novamente.');
+                continue; // Tenta novamente após resolver o desafio
+            }
+
             console.log('Erro ao obter postagens:', error);
             if (retries < MAX_RETRIES) {
                 retries++;
@@ -55,12 +74,8 @@ async function obterPostagens(ig, username, cursor, delay = 2000) {
             }
         }
     } while (true);
-    
-    return { allPosts, cursor: feed.serialize() };
-}
 
-function salvarPostagensEmArquivo(postagens, caminhoArquivo) {
-    FS.writeFileSync(caminhoArquivo, JSON.stringify(postagens, null, 2));
+    return { allPosts, cursor: feed.serialize() };
 }
 
 function exibirPostagens(postagens) {
@@ -77,7 +92,8 @@ function exibirPostagens(postagens) {
 async function listarPostagens() {
     const ig = new IgApiClient();
     const cursorFile = 'cursorState.json';
-    const delay = 2000; // Delay entre as requisições
+    const postagensFile = 'postagensFull.json';
+    const delay = 2000;
 
     const { LOGIN, PASSWORD } = process.env;
     if (!LOGIN || !PASSWORD) {
@@ -88,16 +104,19 @@ async function listarPostagens() {
     try {
         await autenticarUsuario(ig, LOGIN, PASSWORD);
         const cursor = lerEstadoCursor(cursorFile);
+        const postagensSalvas = lerPostagensSalvas(postagensFile);
         const { allPosts, cursor: newCursor } = await obterPostagens(ig, 'trizzinomotors', cursor, delay);
 
-        console.log(`Total de postagens recuperadas: ${allPosts.length}`);
-        if (allPosts.length === 0) {
+        const todasPostagens = postagensSalvas.concat(allPosts);
+
+        console.log(`Total de postagens recuperadas: ${todasPostagens.length}`);
+        if (todasPostagens.length === 0) {
             console.log('Nenhuma postagem encontrada.');
             return;
         }
 
-        salvarPostagensEmArquivo(allPosts, 'postagensFull.json');
-        exibirPostagens(allPosts);
+        salvarPostagensEmArquivo(todasPostagens, postagensFile);
+        exibirPostagens(todasPostagens);
         salvarEstadoCursor(cursorFile, newCursor);
     } catch (error) {
         console.error('Erro ao listar postagens:', error);
